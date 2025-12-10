@@ -1,0 +1,185 @@
+# Windows 11 Debloater Configuration
+# ==================================
+# Format: AppName,RemoveUser,RemoveProvisioned
+# RemoveUser: 1 removes for current user, 0 keeps it
+# RemoveProvisioned: 1 prevents install for new users, 0 keeps in system image
+#
+# Critical apps below are protected from removal unless using -Force parameter
+# These are core system apps that Windows needs for basic functionality
+
+[CriticalApps]
+Microsoft.WindowsStore
+Microsoft.WindowsCalculator
+Microsoft.MSPaint
+Microsoft.WindowsNotepad
+Microsoft.WindowsTerminal
+Microsoft.WindowsPhotos
+Microsoft.WindowsCamera
+Microsoft.WindowsAlarms
+Microsoft.WindowsSoundRecorder
+Microsoft.WindowsMaps
+Microsoft.WindowsMail
+Microsoft.WindowsCalendar
+Microsoft.WindowsClock
+Microsoft.WindowsSettings
+Microsoft.WindowsSecurity
+
+# ========================
+# Communication Apps
+# ========================
+Microsoft.SkypeApp,1,1
+Microsoft.Teams,1,1
+Microsoft.YourPhone,1,1
+Microsoft.People,1,1
+Microsoft.Messaging,1,1
+
+# ========================
+# Xbox & Gaming
+# ========================
+Microsoft.XboxApp,1,1
+Microsoft.XboxGameOverlay,1,1
+Microsoft.XboxIdentityProvider,1,1
+Microsoft.XboxSpeechToTextOverlay,1,1
+Microsoft.Xbox.TCUI,1,1
+Microsoft.XboxGamingOverlay,1,1
+Microsoft.GamingApp,1,1
+Microsoft.GamingServices,1,1
+Microsoft.XboxGameCallableUI,1,1
+
+# ========================
+# Media & Entertainment
+# ========================
+Microsoft.ZuneMusic,1,1
+Microsoft.ZuneVideo,1,1
+Microsoft.MicrosoftSolitaireCollection,1,1
+SpotifyAB.SpotifyMusic,1,1
+PandoraMediaInc.29680B314EFC2,1,1
+Disney.37853FC22B2CE,1,1
+Netflix.Netflix,1,1
+Microsoft.MixedReality.Portal,1,1
+
+# ========================
+# Bing & Cortana
+# ========================
+Microsoft.BingNews,1,1
+Microsoft.BingWeather,1,1
+Microsoft.BingFinance,1,1
+Microsoft.BingSports,1,1
+Microsoft.BingTravel,1,1
+Microsoft.BingFoodAndDrink,1,1
+Microsoft.BingHealthAndFitness,1,1
+Microsoft.549981C3F5F10,1,1
+
+# ========================
+# Social Media
+# ========================
+Facebook.Facebook,1,1
+Instagram.Instagram,1,1
+Twitter.Twitter,1,1
+TikTok.TikTok,1,1
+LinkedIn.LinkedIn,1,1
+
+# ========================
+# Productivity
+# ========================
+Microsoft.GetHelp,1,1
+Microsoft.Getstarted,1,1
+Microsoft.MicrosoftOfficeHub,1,1
+Microsoft.Print3D,1,1
+Microsoft.PowerAutomateDesktop,1,1
+Microsoft.Whiteboard,1,1
+Microsoft.OneConnect,1,1
+
+# ========================
+# Utilities & Misc
+# ========================
+Microsoft.3DBuilder,1,1
+Microsoft.Microsoft3DViewer,1,1
+Microsoft.Wallet,1,1
+Microsoft.WindowsFeedbackHub,1,1
+Microsoft.WindowsScan,1,1
+Microsoft.ScreenSketch,1,1
+Microsoft.OneDriveSync,1,1
+
+# ========================
+# Third-Party Apps
+# ========================
+AdobeSystemsIncorporated.AdobePhotoshopExpress,1,1
+DolbyLaboratories.DolbyAccess,1,1
+Duolingo.Duolingo,1,1
+KeeperSecurityInc.Keeper,1,1
+McAfeeSecurityScan,1,1
+PicsArt.PicsArt,1,1
+
+# ========================
+# OEM Bloatware (Examples)
+# ========================
+# ASUS
+ASUS.ArmouryCrate,1,1
+ASUS.AiSuite,1,1
+
+# Dell
+Dell.CommandUpdate,1,1
+Dell.DellDigitalDelivery,1,1
+Dell.SupportAssist,1,1
+
+# HP
+HP.PrinterAssistant,1,1
+HP.HPSupportAssistant,1,1
+HP.HPJumpStart,1,1
+
+# Lenovo
+LenovoCorporation.LenovoVantage,1,1
+LenovoCorporation.LenovoUtility,1,1
+
+# Acer
+AcerIncorporated.AcerCareCenter,1,1
+AcerIncorporated.AcerProductRegistration,1,1
+
+# Surface
+MicrosoftCorporationII.MicrosoftFamily,1,1
+
+# ========================
+# Windows Tweaks Section
+# ========================
+[Tweaks]
+DisableTelemetry,1
+DisableAdvertisingID,1
+DisableFeedback,1
+DisableCortana,1
+DisableLocation,1
+DisableErrorReporting,1
+DisableWiFiSense,1
+DisableConsumerFeatures,1
+DisableBackgroundApps,1
+DisableLockScreenTips,1
+DisableBingSearch,1
+DisableWebSearch,1
+DisableSuggestions,1
+DisableTimeline,1
+DisableActivityHistory,1
+DisableOneDrive,0
+ShowFileExtensions,1
+ShowHiddenFiles,1
+ShowProtectedFiles,1
+DisableSuperfetch,1
+DisableWindowsTips,1
+DisableGameBar,1
+DisableXboxGameDVR,1
+DisableDefenderCloud,1
+DisableDefenderSampleSubmission,1
+DisableDefenderMAPS,1
+DisableWindowsUpdate,0
+PauseUpdates,0
+SetPowerPlanHighPerformance,1
+DisableAnimations,1
+DisableTransparency,1
+DisableStartMenuAds,1
+DisableLockScreenAds,1
+DisableEdgePrelaunch,1
+DisableEdgeTabPreload,1
+DisableSmartScreen,0
+DisableRemoteAssistance,1
+DisableRemoteDesktop,0
+DisableUAC,0
+DisableFirewall,0

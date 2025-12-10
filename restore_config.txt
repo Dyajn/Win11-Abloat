@@ -1,0 +1,14 @@
+# AppName,RemoveUser,RemoveProvisioned,Safe
+# RemoveUser: 1 to restore for current user, 0 to skip
+# RemoveProvisioned: 1 to restore for new users, 0 to skip
+# Safe: 1 = critical app, 0 = normal
+# NOTE: The 'Safe' column is used for critical app warnings only.
+
+# Example restore config (edit as needed)
+Microsoft.WindowsStore,1,1,1
+Microsoft.WindowsCalculator,1,1,1
+Microsoft.MSPaint,1,1,1
+Microsoft.WindowsNotepad,1,1,1
+Microsoft.WindowsTerminal,1,1,1
+Microsoft.Windows.Photos,1,1,1
+# Add more apps below as needed for restoration
