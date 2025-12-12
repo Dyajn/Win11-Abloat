@@ -1,36 +1,13 @@
 <#
 .SYNOPSIS
-    Windows 11 Bloatware Remover with External Configuration (Advanced)
+    Windows 11 Bloatware Remover with External Configuration
 .DESCRIPTION
     Removes pre-installed Windows 11 apps based on config.txt settings.
-    Granular control per app (user vs. provisioned removal).
-    Features dry run, logging, restoration, log rotation, group UI, help, validation, and more.
+    Features dry run, logging, restoration, group UI, and system tweaks.
 .NOTES
-    Version: 4.0
+    Version: 4.2
     Author: Dyno
-    Improvements:
-    - Strict mode and CmdletBinding for reliability
-    - Atomic file writes for config and backup
-    - Duplicate app name check in config
-    - Configurable critical app list with overlap validation and user prompt
-    - Log rotation (keep last 5 logs)
-    - Robust try/catch for MessageBox in EXE mode
-    - Improved parameter validation and help output
-    - Optional Event Log logging for critical errors
-    - DRY principle for tweaks list (single source of truth)
-    - Help/usage and tweaks listing switches
-    - Config validation (unknown/duplicate/critical overlap)
-    - End-of-run feedback: removed/skipped apps, CSV export
-    - Fallback error log to Desktop if log path fails
-    - Wildcard support for app names and group UI
-    - Restore suggestions for missing packages
-    - Interactive group selection UI
-    - Write-Progress with progress bar clearing
-    - Registry tweaks ensure parent keys exist (New-Item -Force)
-    - Power plan GUID extraction is locale-robust
-    - Notepad log viewer opens only once per run
-    - Comprehensive comments and code cleanups
-    - Designed for Windows 11, PowerShell 5.0+, and both script/EXE modes
+    Requires: Windows 11 (Build 22000+), PowerShell 5.0+, Administrator privileges
 #>
 
 [CmdletBinding()]
@@ -67,7 +44,6 @@ if ($ExeDir) {
     }
 }
 
-# ----------------------------
 # Determine Config Directory
 if ([string]::IsNullOrEmpty($ConfigDir)) {
     if ($IsExe) {
@@ -88,14 +64,25 @@ if (-not (Test-Path $ConfigDir)) {
     New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 }
 
+# Create subdirectories for logs, transcripts, backups, and restore points
+$logsDir = Join-Path $ConfigDir 'logs'
+$transcriptsDir = Join-Path $ConfigDir 'transcripts'
+$backupsDir = Join-Path $ConfigDir 'backups'
+$restoreDir = Join-Path $ConfigDir 'restore'
+foreach ($dir in @($logsDir, $transcriptsDir, $backupsDir, $restoreDir)) {
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
 if ($Transcript) {
-    $transcriptPath = Join-Path $ConfigDir "PS-Transcript_$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+    $transcriptPath = Join-Path $transcriptsDir "PS-Transcript_$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
     Start-Transcript -Path $transcriptPath -Append
 }
 
-# Compute the path to config.txt so help can display it
+# Compute the path to config files so help can display it
 $configFile   = Join-Path $ConfigDir 'config.txt'
-$restoreConfig= Join-Path $ConfigDir 'restore_config.txt'
+$restoreConfig= Join-Path $restoreDir 'restore_config.txt'
 
 # Known tweaks (for dynamic help listing)
 $knownTweaks = @(
@@ -178,23 +165,6 @@ Notes:
 
 $LogShown = $false
 
-function ConvertTo-Array {
-    [CmdletBinding()]
-    param(
-        [Parameter(Position = 0)]
-        [AllowNull()]
-        [object]$Value
-    )
-
-    switch ($Value) {
-        $null { return @() }                                         # -> []
-        { $_ -is [System.Collections.IList] -and -not ($_ -is [string]) } {
-            return $Value                                           # already list/array
-        }
-        default { return ,$Value }                                   # scalar -> [scalar]
-    }
-}
-
 if ($ListTweaks) {
     Write-Host "`nAvailable Tweaks:" -ForegroundColor Cyan
     foreach ($t in $knownTweaks) {
@@ -206,8 +176,9 @@ if ($ListTweaks) {
 # Helper function to escape regex except *
 function ConvertTo-RegexWildcard {
     param([string]$pattern)
+    # Escape all regex special characters, then convert the escaped wildcard back to a regex wildcard
     $escaped = [Regex]::Escape($pattern) -replace '\\\*', '.*'
-    return $escaped
+    return "^$escaped$" # Anchor the pattern for exact matching
 }
 
 # Log rotation: keep last 5 logs
@@ -230,14 +201,13 @@ function Remove-OldLogs {
         Write-Host "Log rotation failed: $_" -ForegroundColor Yellow
     }
 }
-Remove-OldLogs -Dir $ConfigDir
+Remove-OldLogs -Dir $logsDir
 
 if ($LogPath -eq "") {
-    $LogPath = Join-Path $ConfigDir "Windows11Debloater_$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $LogPath = Join-Path $logsDir "Windows11Debloater_$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
-#endregion
 
-#region Elevation: Relaunch as Admin if Needed
+# Elevation: Relaunch as Admin if Needed
 function Test-IsAdmin {
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
@@ -346,140 +316,105 @@ function Write-Log {
 }
 #endregion
 
-function Remove-AppxPackages {
-    param (
-        [array]   $items,
-        [string]  $name,
-        [ref]     $removalTracker,
-        [string]  $type    = 'User',    # 'User' or 'Provisioned'
-        [switch]  $DryRun
-    )
-    $removedAny = $false
-    foreach ($item in $items) {
-        try {
-            if ($DryRun) {
-                Write-Log "[DRY RUN] Would remove $type package: $($item.Name)" -Level "INFO"
-            } else {
-                $item | Remove-AppxPackage -ErrorAction Stop
-                Write-Log "✓ Removed $type package: $($item.Name)" -Level "INFO"
-                $removalTracker.Value.UserSuccess++
-            }
-            $removedAny = $true
-        } catch {
-            Write-Log "✗ Failed to remove $type package: $($item.Name) - $_" -Level "ERROR"
-            $removalTracker.Value.UserFail++
-        }
-    }
-    return $removedAny
-}
-
-function Invoke-ProvisionedPackageRemoval {
-    param (
-        [array]$items,
-        [string]$name,
-        [ref]$removalTracker,
-        [switch]$DryRun
-    )
-    $removedAny = $false
-    
-    # Ensure $items is treated as an array in PS 5.1
-    $itemsArray = @($items)
-    
-    foreach ($item in $itemsArray) {
-        try {
-            if ($DryRun) {
-                Write-Log "[DRY RUN] Would remove provisioned package: $($item.DisplayName)" -Level "INFO"
-            } else {
-                $item | Remove-AppxProvisionedPackage -Online -ErrorAction Stop
-                Write-Log "✓ Removed provisioned package: $($item.DisplayName)" -Level "INFO"
-                $removalTracker.Value.ProvSuccess++
-                $removalTracker.Value.AnyProvRemoved = $true
-            }
-            $removedAny = $true
-        } catch {
-            Write-Log "✗ Failed to remove provisioned package: $($item.DisplayName) - $_" -Level "ERROR"
-            $removalTracker.Value.ProvFail++
-        }
-    }
-    return $removedAny
-}
-
 function Remove-AppxWithSettings {
+    [CmdletBinding()]
     param (
+        [Parameter(Mandatory = $true)]
         $app,
+
+        [Parameter(Mandatory = $true)]
         [ref]$removalTracker,
+
+        [Parameter(Mandatory = $true)]
         [ref]$removedApps,
+
+        [Parameter(Mandatory = $true)]
         [ref]$skippedApps,
+
         [switch]$DryRun
     )
 
     Write-Log "Processing: $($app.Name) - User: $($app.RemoveUser), Provisioned: $($app.RemoveProvisioned)" -Level "INFO"
-    $removed = $false
+    $appNamePattern = "*$($app.Name)*"
+    $actionTaken = $false
 
-    # --- User packages ---
+    # --- 1. Handle User Package Removal ---
     if ($app.RemoveUser -eq 1) {
         try {
-            # Use wildcard matching for better app detection
-            $pkgs = Get-AppxPackage -AllUsers | Where-Object { 
-                $_.Name -like "*$($app.Name)*" -or 
-                $_.Name -eq $app.Name -or
-                $_.PackageFamilyName -like "*$($app.Name)*"
-            }
-            
-            if ($pkgs) {
-                if (Remove-AppxPackages -items $pkgs -name $app.Name -removalTracker $removalTracker -type 'User' -DryRun:$DryRun) {
-                    $removed = $true
-                } else {
-                    $removalTracker.Value.UserSkipped++
+            # PERFORMANCE: Use the -Name parameter for fast, native filtering.
+            $userPackages = Get-AppxPackage -AllUsers -Name $appNamePattern -ErrorAction SilentlyContinue
+
+            if ($userPackages) {
+                $actionTaken = $true
+                foreach ($pkg in $userPackages) {
+                    $userInfo = if ($pkg.PackageUserInformation) { "for user $($pkg.PackageUserInformation.UserSecurityId.Value)" } else { "(All Users)" }
+                    Write-Log "  - Found user package: $($pkg.Name) $userInfo" -Level "INFO"
+                    if ($DryRun) {
+                        Write-Log "    [DRY RUN] Would remove user package." -Level "INFO"
+                    } else {
+                        Write-Log "    Removing user package..." -Level "INFO"
+                        Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
+                        Write-Log "    ✓ Successfully removed user package." -Level "INFO"
+                        $removalTracker.Value.UserSuccess++
+                    }
                 }
             } else {
-                Write-Log "No user packages found for: $($app.Name)" -Level "INFO"
+                Write-Log "  - No user packages found matching '$($app.Name)'." -Level "INFO"
                 $removalTracker.Value.UserSkipped++
             }
         } catch {
-            Write-Log "✗ User package removal failed: $($app.Name) - $_" -Level "ERROR"
+            Write-Log "  - ✗ ERROR removing user package for '$($app.Name)': $_" -Level "ERROR"
             $removalTracker.Value.UserFail++
         }
     }
 
-    # --- Provisioned packages ---
+    # --- 2. Handle Provisioned Package Removal ---
     if ($app.RemoveProvisioned -eq 1) {
         try {
-            # Use wildcard matching for better app detection
-            $prov = Get-AppxProvisionedPackage -Online -ErrorAction Stop |
-                    Where-Object { 
-                        $_.DisplayName -like "*$($app.Name)*" -or 
-                        $_.DisplayName -eq $app.Name -or
-                        $_.PackageName -like "*$($app.Name)*"
+            # Get-AppxProvisionedPackage doesn't have -Name, so Where-Object is necessary here, but it's still fast.
+            $provisionedPackages = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like $appNamePattern }
+
+            if ($provisionedPackages) {
+                $actionTaken = $true
+                foreach ($pkg in $provisionedPackages) {
+                    Write-Log "  - Found provisioned package: $($pkg.DisplayName)" -Level "INFO"
+                    if ($DryRun) {
+                        Write-Log "    [DRY RUN] Would remove provisioned package." -Level "INFO"
+                    } else {
+                        Write-Log "    Removing provisioned package..." -Level "INFO"
+                        Remove-AppxProvisionedPackage -Online -PackageName $pkg.PackageName -ErrorAction Stop
+                        Write-Log "    ✓ Successfully removed provisioned package." -Level "INFO"
+                        $removalTracker.Value.ProvSuccess++
+                        $removalTracker.Value.AnyProvRemoved = $true
                     }
-            
-            if ($prov) {
-                if (Invoke-ProvisionedPackageRemoval -items $prov -name $app.Name -removalTracker $removalTracker -DryRun:$DryRun) {
-                    $removed = $true
-                } else {
-                    $removalTracker.Value.ProvSkipped++
                 }
             } else {
-                Write-Log "No provisioned packages found for: $($app.Name)" -Level "INFO"
+                Write-Log "  - No provisioned package found matching '$($app.Name)'." -Level "INFO"
                 $removalTracker.Value.ProvSkipped++
             }
         } catch {
-            Write-Log "✗ Provisioned package removal failed: $($app.Name) - $_" -Level "ERROR"
+            Write-Log "  - ✗ ERROR removing provisioned package for '$($app.Name)': $_" -Level "ERROR"
             $removalTracker.Value.ProvFail++
         }
     }
 
-    if ($removed) {
+    # --- 3. Update Final Tracking Lists ---
+    # If any action was taken (even a dry run find), count it as "removed" for the summary.
+    # Otherwise, it was truly "skipped" because nothing was found.
+    if ($actionTaken) {
         $removedApps.Value.Add($app.Name)
     } else {
-        $skippedApps.Value.Add($app.Name)
+        # Only add to skipped if an action was intended but no package was found.
+        if ($app.RemoveUser -eq 1 -or $app.RemoveProvisioned -eq 1) {
+            $skippedApps.Value.Add($app.Name)
+        }
     }
 }
 
 
 #region Config/Backup/Restore Paths
-$backupConfig = Join-Path $ConfigDir "config_backup_$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
-$currentStateFile = Join-Path $ConfigDir "current_state_$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+$backupConfig = Join-Path $backupsDir "config_backup_$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+$currentStateFile = Join-Path $backupsDir "current_state_$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
 #endregion
 
 #region Default Config Template (with optional [CriticalApps] section)
@@ -796,28 +731,20 @@ function Invoke-GroupSelection {
         if ($choice -match '^[yY]') { $selectedGroups += $group }
     }
 
-    # Build one flat list of fully–qualified names that belong to those groups
-    $selectedApps = @()
-    foreach ($g in $selectedGroups) { $selectedApps += $appGroups[$g] }
+    if ($selectedGroups.Count -eq 0) {
+        Write-Host "No groups selected. No apps will be processed." -ForegroundColor Yellow
+        return @()
+    }
 
-    # Filter $allApps => keep only items whose name matches   ────────────────
-    $filtered = @(
-        foreach ($item in $allApps) {
+    # REFINEMENT: Build a single, efficient regex from the selected group apps.
+    $selectedAppPatterns = @()
+    foreach ($g in $selectedGroups) { $selectedAppPatterns += $appGroups[$g] }
+    
+    # Escape each pattern for regex and join with '|' (OR)
+    $regexPattern = ($selectedAppPatterns | ForEach-Object { [Regex]::Escape($_) }) -join '|'
 
-            # Determine the canonical name for comparison
-            $candidateName = if ($item -is [psobject] -and $item.PSObject.Properties['Name']) {
-                                $item.Name
-                             } else {
-                                # fall back to ToString() for scalars/strings
-                                $item.ToString()
-                             }
-
-            if ($selectedApps | Where-Object { $candidateName -like $_ }) {
-                # Pass the original object (not just its name) along
-                $item
-            }
-        }
-    )
+    # Filter the main app list using the single regex
+    $filtered = $allApps | Where-Object { $_.Name -match $regexPattern }
 
     Write-Host "Selected $($filtered.Count) apps from groups: $($selectedGroups -join ', ')" -ForegroundColor Cyan
     return $filtered
@@ -825,6 +752,7 @@ function Invoke-GroupSelection {
 #endregion
 
 #region Core Functions (with improvements)
+# --- inside A.ps1 ---
 function Test-ConfigFile {
     param(
         [string]$Path,
@@ -1456,25 +1384,32 @@ function Test-AppNames {
         [array]$apps
     )
 
-    # Build a master list of all installed app names and identifiers
-    $allAppIdentifiers = @()
+    # REFINEMENT: Use a HashSet for much faster lookups (O(1) vs O(n)).
+    $allAppIdentifiers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    
     Get-AppxPackage -AllUsers | ForEach-Object {
-        $allAppIdentifiers += $_.Name
-        $allAppIdentifiers += $_.PackageFamilyName
+        if (-not [string]::IsNullOrEmpty($_.Name)) { $allAppIdentifiers.Add($_.Name) | Out-Null }
+        if (-not [string]::IsNullOrEmpty($_.PackageFamilyName)) { $allAppIdentifiers.Add($_.PackageFamilyName) | Out-Null }
     }
     Get-AppxProvisionedPackage -Online | ForEach-Object {
-        $allAppIdentifiers += $_.DisplayName
-        $allAppIdentifiers += $_.PackageName
+        if (-not [string]::IsNullOrEmpty($_.DisplayName)) { $allAppIdentifiers.Add($_.DisplayName) | Out-Null }
+        if (-not [string]::IsNullOrEmpty($_.PackageName)) { $allAppIdentifiers.Add($_.PackageName) | Out-Null }
     }
-    # Filter out null/empty strings and get unique values
-    $uniqueIdentifiers = $allAppIdentifiers | Where-Object { -not [string]::IsNullOrEmpty($_) } | Sort-Object -Unique
 
     foreach ($app in $apps) {
-        # Use simple wildcard matching, consistent with removal logic
+        # Since removal logic uses wildcards, we can't do a direct HashSet lookup.
+        # We must iterate, but we can optimize by pre-filtering the HashSet.
         $pattern = "*$($app.Name)*"
         
-        # Use -like for wildcard matching, which is case-insensitive by default in PowerShell
-        $found = $uniqueIdentifiers -like $pattern
+        # The -like operator is efficient enough here, and this check is a user-friendly feature,
+        # not a performance-critical part of the removal loop.
+        $found = $false
+        foreach($identifier in $allAppIdentifiers) {
+            if($identifier -like $pattern) {
+                $found = $true
+                break
+            }
+        }
 
         if (-not $found) {
             Write-Warning "App '$($app.Name)' not found on system. Check for typos or missing packages."
@@ -1713,7 +1648,7 @@ function Show-Summary {
     }
 
     # CSV export ― unchanged
-    $csvPath = Join-Path $ConfigDir "removal_results_$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
+    $csvPath = Join-Path $logsDir "removal_results_$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
     $results = @()
     foreach ($app in $removedUnique) { $results += [PSCustomObject]@{App=$app;Status="Removed"} }
     foreach ($app in $skippedUnique) { $results += [PSCustomObject]@{App=$app;Status="Skipped/Failed"} }
@@ -1762,23 +1697,17 @@ try {
     try {
         if (-not (Test-ConfigFile -Path $configFile -DryRun:$DryRun -Force:$Force)) { exit 1 }
         $result = Read-ConfigFile -Path $configFile
-        $appsToProcess = ConvertTo-Array $result[0]
+        $appsToProcess = $result[0] # This is already an array
         $criticalApps = $result[1]
 
-        if ((@($appsToProcess)).Count -gt 0) {
-            # use named parameter so the whole array is passed as a single argument
+        if ($appsToProcess.Count -gt 0) {
             Test-AppNames -apps $appsToProcess
         }
         else {
-            Write-Log "No apps to validate (appsToProcess is null or empty)." -Level "INFO"
+            Write-Log "No apps to validate (appsToProcess is empty)." -Level "INFO"
         }
 
-        if ($appsToProcess -is [System.Collections.ICollection]) {
-            $appsCount = (@($appsToProcess)).Count
-        }
-        else {
-            $appsCount = @($appsToProcess).Count
-        }
+        $appsCount = $appsToProcess.Count
 
         Write-Host "`n===== Config Summary =====" -ForegroundColor Cyan
         Write-Host "Apps to process: $appsCount" -ForegroundColor Cyan
@@ -1804,8 +1733,8 @@ try {
     if (-not $NoGroups -and -not $Silent) {
         $groupChoice = Read-Host "`nUse group selection UI? (Y/N)"
         if ($groupChoice -match "^[yY]") {
-            $appsToProcess = ConvertTo-Array (Invoke-GroupSelection $appsToProcess)
-            $appsCount = (@($appsToProcess)).Count
+            $appsToProcess = Invoke-GroupSelection $appsToProcess # This returns an array
+            $appsCount = $appsToProcess.Count
             $useGroups = $true
         }
     }
@@ -1841,12 +1770,11 @@ try {
         AnyProvRemoved = $false
     }
 
-    # PowerShell will enumerate the list correctly, if switched to a plain array, use @().
     $removedApps = New-Object System.Collections.Generic.List[string]
     $skippedApps = New-Object System.Collections.Generic.List[string] 
 
     # Guard against zero apps (prevents 0/0 in Write-Progress)
-    if ((@($appsToProcess)).Count -eq 0) {
+    if ($appsToProcess.Count -eq 0) {
         Write-Host "`nNo apps to process. Exiting." -ForegroundColor Yellow
         exit 0
     }
@@ -1871,7 +1799,7 @@ try {
         Write-Progress -Id $progressId -Activity "Removing Apps" -Completed
     }
 
-    $totalApps = @($appsToProcess).Count
+    $totalApps = $appsToProcess.Count
 
     # Show final summary
     Show-Summary -removalTracker $removalTracker `
