@@ -2009,13 +2009,314 @@ function Show-Summary {
         Write-Host "For complete removal, a system reboot is recommended." -ForegroundColor Yellow
     }
 
-    # CSV export ― unchanged
+    # CSV export
     $csvPath = Join-Path $logsDir "removal_results_$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
     $results = @()
     foreach ($app in $removedUnique) { $results += [PSCustomObject]@{App=$app;Status="Removed"} }
     foreach ($app in $skippedUnique) { $results += [PSCustomObject]@{App=$app;Status="Skipped/Failed"} }
     $results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
     Write-Host "`nDetailed results exported to: $csvPath" -ForegroundColor Blue
+    
+    # Generate HTML report if not in dry run mode
+    if (-not $Global:DryRun) {
+        try {
+            $reportPath = New-HtmlReport -RemovalTracker @{
+                UserSuccess = $removalTracker.UserSuccess
+                UserFail = $removalTracker.UserFail
+                ProvSuccess = $removalTracker.ProvSuccess
+                ProvFail = $removalTracker.ProvFail
+                ProvSkipped = $removalTracker.ProvSkipped
+                AnyProvRemoved = $removalTracker.AnyProvRemoved
+            } -RemovedApps $removedApps -SkippedApps $skippedApps -LogPath $LogPath -OpenInBrowser:(-not $Global:Silent)
+            
+            if ($reportPath) {
+                Write-Host "`n📊 Detailed HTML report generated: $reportPath" -ForegroundColor Blue
+                if (-not $Global:Silent) {
+                    $openReport = Read-Host "Open report in default browser? (Y/N)"
+                    if ($openReport -match "^[yY]") {
+                        Start-Process $reportPath
+                    }
+                }
+            }
+        } catch {
+            Write-Log "Failed to generate HTML report: $_" -Level "WARN"
+            Write-Host "Failed to generate HTML report: $_" -ForegroundColor Yellow
+        }
+    }
+}
+#endregion
+
+#region HTML Report Generation
+function New-HtmlReport {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory=$true)]
+        [hashtable]$RemovalTracker,
+        
+        [Parameter(Mandatory=$true)]
+        [array]$RemovedApps,
+        
+        [Parameter(Mandatory=$true)]
+        [array]$SkippedApps,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$LogPath,
+        
+        [string]$OutputPath = "",
+        
+        [switch]$OpenInBrowser
+    )
+    
+    try {
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $hostname = $env:COMPUTERNAME
+        $os = (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
+        $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        
+        # Sort and get unique app lists
+        $removedUnique = $RemovedApps | Sort-Object -Unique
+        $skippedUnique = $SkippedApps | Sort-Object -Unique
+        
+        # Generate HTML content
+        $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Windows 11 Debloater Report</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            line-height: 1.6; 
+            color: #333; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        h1, h2, h3 { 
+            color: #2c3e50; 
+            margin-top: 24px;
+        }
+        h1 { 
+            border-bottom: 2px solid #3498db; 
+            padding-bottom: 10px;
+            color: #2980b9;
+        }
+        .summary-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .success { color: #27ae60; }
+        .warning { color: #f39c12; }
+        .error { color: #e74c3c; }
+        .info { color: #3498db; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            background: white;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        th {
+            background-color: #f2f7fd;
+            font-weight: 600;
+        }
+        tr:hover {
+            background-color: #f5f9ff;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .status-removed {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status-skipped {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .status-failed {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .system-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .info-item {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .info-item h4 {
+            margin-top: 0;
+            color: #2c3e50;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 8px;
+        }
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.9em;
+            padding: 15px;
+            border-top: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <h1>Windows 11 Debloater Report</h1>
+    
+    <div class="summary-card">
+        <h2>📊 Execution Summary</h2>
+        <div class="system-info">
+            <div class="info-item">
+                <h4>System Information</h4>
+                <p><strong>Computer Name:</strong> $($env:COMPUTERNAME)</p>
+                <p><strong>OS:</strong> $($os)</p>
+                <p><strong>User:</strong> $($user)</p>
+                <p><strong>Report Generated:</strong> $($timestamp)</p>
+            </div>
+            <div class="info-item">
+                <h4>Removal Statistics</h4>
+                <p><strong>Total Apps Processed:</strong> $($RemovedApps.Count + $SkippedApps.Count)</p>
+                <p><strong>Successfully Removed:</strong> <span class="success">$($removedUnique.Count)</span></p>
+                <p><strong>Skipped/Not Found:</strong> <span class="warning">$($skippedUnique.Count)</span></p>
+                <p><strong>User Package Removals:</strong> $($RemovalTracker.UserSuccess) of $($RemovalTracker.UserSuccess + $RemovalTracker.UserFail)</p>
+                <p><strong>Provisioned Package Removals:</strong> $($RemovalTracker.ProvSuccess) of $($RemovalTracker.ProvSuccess + $RemovalTracker.ProvFail)</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="summary-card">
+        <h2>📋 Detailed Results</h2>
+        
+        <h3>Removed Apps</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>App Name</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+"@
+        
+        # Add removed apps
+        if ($removedUnique.Count -gt 0) {
+            foreach ($app in $removedUnique) {
+                $html += @"
+                <tr>
+                    <td>$app</td>
+                    <td><span class="status-badge status-removed">Removed</span></td>
+                </tr>
+"@
+            }
+        } else {
+            $html += @"
+                <tr>
+                    <td colspan="2" style="text-align: center;">No apps were removed (dry run or no matching apps)</td>
+                </tr>
+"@
+        }
+        
+        $html += @"
+            </tbody>
+        </table>
+
+        <h3>Skipped or Failed Apps</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>App Name</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+"@
+        
+        # Add skipped apps
+        if ($skippedUnique.Count -gt 0) {
+            foreach ($app in $skippedUnique) {
+                $html += @"
+                <tr>
+                    <td>$app</td>
+                    <td><span class="status-badge status-skipped">Skipped/Not Found</span></td>
+                </tr>
+"@
+            }
+        } else {
+            $html += @"
+                <tr>
+                    <td colspan="2" style="text-align: center;">No apps were skipped</td>
+                </tr>
+"@
+        }
+        
+        $html += @"
+            </tbody>
+        </table>
+    </div>
+
+    <div class="summary-card">
+        <h2>📝 Additional Information</h2>
+        <p><strong>Log File:</strong> $LogPath</p>
+        <p><strong>Script Version:</strong> 4.2</p>
+        <p><strong>Execution Mode:</strong> $(if ($Global:DryRun) { "Dry Run (No Changes Made)" } else { "Live Mode" })</p>
+    </div>
+
+    <div class="footer">
+        <p>Report generated by Windows 11 Debloater on $timestamp</p>
+    </div>
+</body>
+</html>
+"@
+        # Determine output path
+        if ([string]::IsNullOrEmpty($OutputPath)) {
+            $OutputPath = Join-Path (Split-Path $LogPath -Parent) "Debloater_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+        }
+        
+        # Ensure directory exists
+        $outputDir = Split-Path $OutputPath -Parent
+        if (-not (Test-Path $outputDir)) {
+            New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+        }
+        
+        # Save HTML to file
+        $html | Out-File -FilePath $OutputPath -Encoding UTF8 -Force
+        Write-Log "HTML report generated at: $OutputPath" -Level "INFO"
+        
+        # Open in default browser if requested
+        if ($OpenInBrowser) {
+            Start-Process $OutputPath
+        }
+        
+        return $OutputPath
+    }
+    catch {
+        Write-Log "Error generating HTML report: $_" -Level "ERROR"
+        return $null
+    }
 }
 #endregion
 
