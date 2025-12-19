@@ -10,7 +10,7 @@
     Requires: Windows 11 (Build 22000+), PowerShell 5.0+, Administrator privileges
 #>
 
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+[CmdletBinding()]
 param (
     [Alias("d")][switch]$DryRun = $false,
     [Alias("r")][switch]$Restore = $false,
@@ -21,63 +21,13 @@ param (
     [Alias("lt")][switch]$ListTweaks = $false,
     [Alias("sl")][switch]$ShowLog = $false,
     [Alias("h","?")][switch]$Help = $false,
-    [Alias("wi")][switch]$WhatIf = $false,
+
     [Alias("x")][switch]$Transcript = $false,
-    
-    [ValidateScript({
-        if (-not [string]::IsNullOrEmpty($_) -and -not (Test-Path -Path (Split-Path $_ -Parent) -PathType Container)) {
-            throw "Parent directory of LogPath does not exist"
-        }
-        $true
-    })]
     [string]$LogPath = "",
-    
-    [ValidateScript({
-        if (-not [string]::IsNullOrEmpty($_) -and -not (Test-Path -Path $_ -PathType Container)) {
-            throw "Config directory does not exist"
-        }
-        $true
-    })]
     [string]$ConfigDir = ""
 )
 
 Set-StrictMode -Version Latest
-
-#region Security and Safety Functions
-function Test-IsAdmin {
-    try {
-        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    } catch {
-        Write-Warning "Failed to verify administrator privileges: $_"
-        return $false
-    }
-}
-
-function Test-ExecutionPolicy {
-    $currentPolicy = Get-ExecutionPolicy -Scope Process
-    if ($currentPolicy -eq "Restricted") {
-        throw "PowerShell execution policy is set to Restricted. Please run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"
-    }
-}
-
-function Show-ConfirmationPrompt {
-    param (
-        [string]$Title,
-        [string]$Message,
-        [string]$YesText = "&Yes",
-        [string]$NoText = "&No"
-    )
-    
-    $yes = New-Object System.Management.Automation.Host.ChoiceDescription $YesText, "Proceed with changes"
-    $no = New-Object System.Management.Automation.Host.ChoiceDescription $NoText, "Exit script"
-    $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
-    
-    $result = $host.ui.PromptForChoice($Title, $Message, $options, 1)
-    return $result -eq 0
-}
-#endregion
 
 # EXE-Mode Detection
 function Get-ExeDirectory {
@@ -1709,31 +1659,8 @@ function Show-Summary {
 
 #region Main Execution
 try {
-    # Security and permission checks
-    if (-not (Test-IsAdmin)) {
-        throw "This script requires administrator privileges. Please run as administrator."
-    }
-    
-    Test-ExecutionPolicy
-    
-    # Handle -WhatIf parameter
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Running in WhatIf mode - no changes will be made" -ForegroundColor Cyan
-        $DryRun = $true
-    }
-    
-    # Show confirmation prompt if not in silent mode and not using -Force
-    if (-not $Silent -and -not $Force -and -not $DryRun) {
-        $title = "Windows 11 Debloater - Confirmation"
-        $message = "This script will make system changes. Are you sure you want to continue?"
-        if (-not (Show-ConfirmationPrompt -Title $title -Message $message)) {
-            Write-Host "Operation cancelled by user." -ForegroundColor Yellow
-            exit 0
-        }
-    }
-    
     Write-Log "Starting Windows 11 Debloater" -Level "INFO"
-    Write-Log "Parameters - DryRun: $DryRun, Restore: $Restore, NoGroups: $NoGroups, Force: $Force, Silent: $Silent, WhatIf: $WhatIf" -Level "INFO"
+    Write-Log "Parameters - DryRun: $DryRun, Restore: $Restore, NoGroups: $NoGroups, Force: $Force, Silent: $Silent" -Level "INFO"
     if ($Restore) {
         Write-Host "`n===== Windows 11 App Restoration =====" -ForegroundColor Cyan
         Write-Log "Starting restoration process" -Level "INFO"
