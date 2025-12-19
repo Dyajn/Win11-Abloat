@@ -43,6 +43,133 @@ param (
 
 Set-StrictMode -Version Latest
 
+#region Performance Optimizations
+$Script:AppCache = $null
+$Script:RegistryCache = @{}
+
+function Get-CachedAppxPackage {
+    if ($null -eq $Script:AppCache) {
+        $Script:AppCache = @{
+            UserPackages = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)
+            ProvisionedPackages = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
+        }
+    }
+    return $Script:AppCache
+}
+
+function Clear-AppxCache {
+    $Script:AppCache = $null
+}
+
+function Get-CachedRegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        $DefaultValue = $null
+    )
+    
+    $cacheKey = "${Path}\${Name}"
+    
+    if (-not $Script:RegistryCache.ContainsKey($cacheKey)) {
+        try {
+            $value = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop | 
+                    Select-Object -ExpandProperty $Name -ErrorAction Stop
+            $Script:RegistryCache[$cacheKey] = $value
+        } catch {
+            $Script:RegistryCache[$cacheKey] = $DefaultValue
+        }
+    }
+    
+    return $Script:RegistryCache[$cacheKey]
+}
+#endregion
+
+#region Logging Configuration
+$Script:LogLevels = @{
+    DEBUG = 0
+    INFO  = 1
+    WARN  = 2
+    ERROR = 3
+}
+
+$Script:CurrentLogLevel = $Script:LogLevels.INFO
+
+function Initialize-Logging {
+    param (
+        [string]$LogPath = "",
+        [int32]$MaxLogFiles = 10,
+        [int32]$MaxLogSizeMB = 10
+    )
+    
+    try {
+        if ([string]::IsNullOrEmpty($LogPath)) {
+            $LogPath = Join-Path $logsDir "Win11Debloater_$(Get-Date -Format 'yyyyMMdd').log"
+        }
+        
+        # Ensure log directory exists
+        $logDir = Split-Path $LogPath -Parent
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        
+        # Log rotation
+        if (Test-Path $LogPath) {
+            $logFile = Get-Item $LogPath
+            if ($logFile.Length -gt ($MaxLogSizeMB * 1MB)) {
+                $backupPath = "$($LogPath).$(Get-Date -Format 'yyyyMMddHHmmss').bak"
+                Move-Item -Path $LogPath -Destination $backupPath -Force
+                
+                # Clean up old log files
+                Get-ChildItem -Path $logDir -Filter "*.log.*.bak" | 
+                    Sort-Object LastWriteTime -Descending | 
+                    Select-Object -Skip $MaxLogFiles | 
+                    Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+        }
+        
+        return $LogPath
+    } catch {
+        Write-Warning "Failed to initialize logging: $_"
+        return $null
+    }
+}
+
+function Write-Log {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
+        [ValidateSet('DEBUG','INFO','WARN','ERROR')]
+        [string]$Level = 'INFO',
+        [switch]$NoConsole
+    )
+    
+    try {
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+        $logMessage = "[$timestamp] [$Level] $Message"
+        
+        # Only write to log file if level is at or above current threshold
+        if ($Script:LogLevels[$Level] -ge $Script:CurrentLogLevel) {
+            if (-not $NoConsole) {
+                switch ($Level) {
+                    'ERROR' { Write-Host $logMessage -ForegroundColor Red }
+                    'WARN'  { Write-Host $logMessage -ForegroundColor Yellow }
+                    'INFO'  { Write-Host $logMessage -ForegroundColor White }
+                    'DEBUG' { Write-Host $logMessage -ForegroundColor Gray }
+                }
+            }
+            
+            # Write to log file if initialized
+            if ($Script:LogFile) {
+                Add-Content -Path $Script:LogFile -Value $logMessage -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-Warning "Failed to write log message: $_"
+    }
+}
+#endregion
+
 #region Security and Safety Functions
 function Test-IsAdmin {
     try {
@@ -365,6 +492,111 @@ function Write-Log {
     Add-Content -Path $LogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
 }
 #endregion
+
+function Invoke-Parallel {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory=$true)]
+        [scriptblock]$ScriptBlock,
+        
+        [Parameter(Mandatory=$true)]
+        [array]$InputObject,
+        
+        [int]$MaxThreads = 5,
+        
+        [Parameter(Mandatory=$false)]
+        [hashtable]$Parameters = @{},
+        
+        [switch]$ShowProgress
+    )
+    
+    begin {
+        $sessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxThreads, $sessionState, $Host)
+        $runspacePool.Open()
+        
+        $runspaces = @()
+        $results = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+        $counter = 0
+        $total = $InputObject.Count
+    }
+    
+    process {
+        foreach ($item in $InputObject) {
+            $ps = [powershell]::Create()
+            $ps.RunspacePool = $runspacePool
+            
+            $itemClone = $item
+            $parametersClone = $Parameters.Clone()
+            
+            [void]$ps.AddScript({
+                param($item, $parameters)
+                $parameters['InputObject'] = $item
+                & $using:ScriptBlock @parameters
+            }).AddParameters(@($itemClone, $parametersClone))
+            
+            $psObj = [PSCustomObject]@{
+                Pipe = $ps
+                Handle = $ps.BeginInvoke()
+                OnComplete = $ps.EndInvoke
+            }
+            
+            $runspaces += $psObj
+            
+            # Process completed runspaces
+            $completed = $runspaces | Where-Object { $_.Handle.IsCompleted }
+            foreach ($completedItem in $completed) {
+                try {
+                    $results.Add($completedItem.OnComplete($completedItem.Handle))
+                } catch {
+                    Write-Error $_.Exception
+                } finally {
+                    $completedItem.Pipe.Dispose()
+                    $runspaces = $runspaces | Where-Object { $_ -ne $completedItem }
+                    
+                    $counter++
+                    if ($ShowProgress) {
+                        $percent = [math]::Min(100, [int](($counter / $total) * 100))
+                        Write-Progress -Activity "Processing items in parallel" -Status "$percent% Complete" -PercentComplete $percent
+                    }
+                }
+            }
+        }
+    }
+    
+    end {
+        # Process any remaining runspaces
+        while ($runspaces.Count -gt 0) {
+            $completed = $runspaces | Where-Object { $_.Handle.IsCompleted }
+            foreach ($completedItem in $completed) {
+                try {
+                    $results.Add($completedItem.OnComplete($completedItem.Handle))
+                } catch {
+                    Write-Error $_.Exception
+                } finally {
+                    $completedItem.Pipe.Dispose()
+                    $runspaces = $runspaces | Where-Object { $_ -ne $completedItem }
+                    
+                    $counter++
+                    if ($ShowProgress) {
+                        $percent = [math]::Min(100, [int](($counter / $total) * 100))
+                        Write-Progress -Activity "Processing items in parallel" -Status "$percent% Complete" -PercentComplete $percent
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        
+        if ($ShowProgress) {
+            Write-Progress -Activity "Processing items in parallel" -Completed
+        }
+        
+        $runspacePool.Close()
+        $runspacePool.Dispose()
+        
+        return $results
+    }
+}
 
 function Remove-AppxWithSettings {
     [CmdletBinding()]
@@ -1508,14 +1740,21 @@ function Show-CriticalAppWarning {
     }
     if ($warningsShown -gt 0) {
         Write-Host "`nCritical apps marked for removal:" -ForegroundColor Red
-        foreach ($app in $appsToProcess) {
-            if ($criticalApps.ContainsKey($app.Name) -and ($app.RemoveUser -eq 1 -or $app.RemoveProvisioned -eq 1)) {
-                Write-Host "  $($app.Name)" -ForegroundColor Red
-            }
+        foreach ($app in $appsToRemove) {
+            $currentApp++
+            $percentComplete = [math]::Min(100, [int](($currentApp / $totalApps) * 100))
+            Write-Progress -Activity "Processing Apps" -Status "Removing $($app.Name)" -PercentComplete $percentComplete -CurrentOperation "$currentApp of $totalApps apps processed"
+            
+            Remove-AppxWithSettings -App $app -DryRun:$DryRun -RemovalTracker $removalTracker -RemovedApps $removedApps -SkippedApps $skippedApps
+            
+            # Add a small delay to prevent UI freezing
+            Start-Sleep -Milliseconds 100
         }
-        if (-not $DryRun) {
-            if (-not $Force) {
-                Write-Host "`nCritical apps are marked for removal. Use -Force to proceed, or edit config.txt to keep them." -ForegroundColor Yellow
+        
+        Write-Progress -Activity "Processing Apps" -Completed
+        Write-Host "`nCritical apps marked for removal:" -ForegroundColor Red
+        foreach ($app in $appsToRemove) {
+            Write-Host "  $($app.Name)" -ForegroundColor Red
                 Write-Log "Aborted: Critical apps marked for removal without -Force." -Level "WARN"
                 return 1
             }
@@ -1647,7 +1886,31 @@ function Show-Summary {
     Write-Log "  Skipped: $($removalTracker.ProvSkipped)" -Level "INFO"
     Write-Log "Total apps processed: $totalApps" -Level "INFO"
 
-    Write-Host "`n===== Summary =====" -ForegroundColor Cyan
+    # Clear any progress bars
+    Write-Progress -Activity "Removing Apps" -Completed
+    
+    # Show colorful summary
+    function Write-Header {
+        param($Text)
+        Write-Host "`n$(('=' * 20) + ' ' + $Text + ' ' + ('=' * (60 - $Text.Length - 2)))" -ForegroundColor Cyan
+    }
+    
+    function Write-Success {
+        param($Text)
+        Write-Host "✓ $Text" -ForegroundColor Green
+    }
+    
+    function Write-Warning {
+        param($Text)
+        Write-Host "! $Text" -ForegroundColor Yellow
+    }
+    
+    function Write-Error {
+        param($Text)
+        Write-Host "✗ $Text" -ForegroundColor Red
+    }
+    
+    Write-Header "Summary"
     Write-Host "User package removals:" -ForegroundColor Cyan
     Write-Host "  Successful: $($removalTracker.UserSuccess)" -ForegroundColor Green
     Write-Host "  Failed: $($removalTracker.UserFail)" -ForegroundColor $(if ($removalTracker.UserFail -gt 0) { "Red" } else { "Gray" })
@@ -1709,6 +1972,21 @@ function Show-Summary {
 
 #region Main Execution
 try {
+    # Initialize logging
+    $Script:LogFile = Initialize-Logging -LogPath $LogPath
+    
+    # Create system restore point if not in dry run or whatif mode
+    if (-not $DryRun -and -not $WhatIf) {
+        $restoreCreated = New-SystemRestorePoint -Description "Before running Windows 11 Debloater"
+        if (-not $restoreCreated) {
+            $message = "Failed to create system restore point. Continue anyway?"
+            if (-not $Force -and -not (Show-ConfirmationPrompt -Title "Warning" -Message $message)) {
+                Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+                exit 0
+            }
+        }
+    }
+    
     # Security and permission checks
     if (-not (Test-IsAdmin)) {
         throw "This script requires administrator privileges. Please run as administrator."
@@ -1718,7 +1996,7 @@ try {
     
     # Handle -WhatIf parameter
     if ($WhatIf) {
-        Write-Host "[WhatIf] Running in WhatIf mode - no changes will be made" -ForegroundColor Cyan
+        Write-Log "[WhatIf] Running in WhatIf mode - no changes will be made" -Level INFO
         $DryRun = $true
     }
     
@@ -1852,8 +2130,69 @@ try {
         exit 0
     }
 
-    # Process all apps with progress display
-    $progressId = 1
+    # Process apps in parallel with progress display
+    $totalApps = $appsToRemove.Count
+    $progressParams = @{
+        Activity = "Removing Apps"
+        Status = "Preparing..."
+        PercentComplete = 0
+    }
+    Write-Progress @progressParams
+    
+    # Process apps in parallel (max 5 at a time)
+    $results = Invoke-Parallel -InputObject $appsToRemove -ScriptBlock {
+        param($app)
+        $removalTracker = [PSCustomObject]@{
+            UserSuccess = 0
+            UserFail = 0
+            ProvSuccess = 0
+            ProvFail = 0
+            ProvSkipped = 0
+            AnyProvRemoved = $false
+        }
+        $removedApps = New-Object System.Collections.Generic.List[string]
+        $skippedApps = New-Object System.Collections.Generic.List[string]
+        
+        Remove-AppxWithSettings -app $app `
+                              -removalTracker ([ref]$removalTracker) `
+                              -removedApps ([ref]$removedApps) `
+                              -skippedApps ([ref]$skippedApps) `
+                              -DryRun:$using:DryRun
+        
+        [PSCustomObject]@{
+            App = $app
+            RemovalTracker = $removalTracker
+            RemovedApps = $removedApps
+            SkippedApps = $skippedApps
+        }
+    } -MaxThreads 5 -ShowProgress
+    
+    # Aggregate results
+    $removalTracker = [PSCustomObject]@{
+        UserSuccess = 0
+        UserFail = 0
+        ProvSuccess = 0
+        ProvFail = 0
+        ProvSkipped = 0
+        AnyProvRemoved = $false
+    }
+    $removedApps = New-Object System.Collections.Generic.List[string]
+    $skippedApps = New-Object System.Collections.Generic.List[string]
+    
+    foreach ($result in $results) {
+        $removalTracker.UserSuccess += $result.RemovalTracker.UserSuccess
+        $removalTracker.UserFail += $result.RemovalTracker.UserFail
+        $removalTracker.ProvSuccess += $result.RemovalTracker.ProvSuccess
+        $removalTracker.ProvFail += $result.RemovalTracker.ProvFail
+        $removalTracker.ProvSkipped += $result.RemovalTracker.ProvSkipped
+        $removalTracker.AnyProvRemoved = $removalTracker.AnyProvRemoved -or $result.RemovalTracker.AnyProvRemoved
+        
+        $result.RemovedApps | ForEach-Object { $removedApps.Add($_) }
+        $result.SkippedApps | ForEach-Object { $skippedApps.Add($_) }
+    }
+    
+    Write-Progress -Activity "Removing Apps" -Completed
+    
     try {
         $i = 0
         foreach ($app in $appsToProcess) {
