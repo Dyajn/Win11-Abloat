@@ -43,6 +43,56 @@ param (
 
 Set-StrictMode -Version Latest
 
+#region System Requirements Check
+function Test-SystemRequirements {
+    [CmdletBinding()]
+    param()
+    
+    $requirements = @{
+        'OS Version' = @{
+            Actual = [System.Environment]::OSVersion.Version
+            Required = [Version]'10.0.22000'  # Windows 11
+            Test = { $args[0] -ge $args[1] }
+            Error = 'Windows 11 (Build 22000 or later) is required'
+        }
+        'PowerShell Version' = @{
+            Actual = $PSVersionTable.PSVersion
+            Required = [Version]'5.1'
+            Test = { $args[0] -ge $args[1] }
+            Error = 'PowerShell 5.1 or later is required'
+        }
+        'Administrator' = @{
+            Actual = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            Required = $true
+            Test = { $args[0] -eq $args[1] }
+            Error = 'Administrator privileges are required'
+        }
+    }
+    
+    $results = @()
+    foreach ($req in $requirements.GetEnumerator()) {
+        $testResult = & $req.Value.Test $req.Value.Actual $req.Value.Required
+        $results += [PSCustomObject]@{
+            Requirement = $req.Key
+            Status = if ($testResult) { 'PASS' } else { 'FAIL' }
+            Details = if ($testResult) { 'OK' } else { $req.Value.Error }
+        }
+        
+        if (-not $testResult) {
+            Write-Log "Requirement check failed: $($req.Key) - $($req.Value.Error)" -Level ERROR
+        }
+    }
+    
+    $failed = $results | Where-Object { $_.Status -eq 'FAIL' }
+    if ($failed) {
+        $failed | Format-Table -AutoSize | Out-String | Write-Log -Level ERROR
+        throw "System requirements not met. Check the log for details."
+    }
+    
+    return $results
+}
+#endregion
+
 #region Performance Optimizations
 $Script:AppCache = $null
 $Script:RegistryCache = @{}
@@ -1729,37 +1779,36 @@ function Show-CriticalAppWarning {
         [switch] $DryRun,
         [switch] $Force
     )
-    $warningsShown = 0
+    
+    $appsToRemove = @()
+    
+    # First pass: identify all critical apps that would be removed
     foreach ($app in $appsToProcess) {
         if ($criticalApps.ContainsKey($app.Name)) {
             if ($app.RemoveUser -eq 1 -or $app.RemoveProvisioned -eq 1) {
+                $appsToRemove += $app
                 Write-Log "WARNING: Attempting to remove critical app: $($app.Name)" -Level "WARN"
-                $warningsShown++
             }
         }
     }
-    if ($warningsShown -gt 0) {
-        Write-Host "`nCritical apps marked for removal:" -ForegroundColor Red
+    
+    # If we found critical apps and -Force wasn't specified, show warning and return error
+    if ($appsToRemove.Count -gt 0) {
+        Write-Host "`nWARNING: The following critical apps are marked for removal:" -ForegroundColor Red
         foreach ($app in $appsToRemove) {
-            $currentApp++
-            $percentComplete = [math]::Min(100, [int](($currentApp / $totalApps) * 100))
-            Write-Progress -Activity "Processing Apps" -Status "Removing $($app.Name)" -PercentComplete $percentComplete -CurrentOperation "$currentApp of $totalApps apps processed"
-            
-            Remove-AppxWithSettings -App $app -DryRun:$DryRun -RemovalTracker $removalTracker -RemovedApps $removedApps -SkippedApps $skippedApps
-            
-            # Add a small delay to prevent UI freezing
-            Start-Sleep -Milliseconds 100
+            Write-Host "  - $($app.Name)" -ForegroundColor Red
         }
         
-        Write-Progress -Activity "Processing Apps" -Completed
-        Write-Host "`nCritical apps marked for removal:" -ForegroundColor Red
-        foreach ($app in $appsToRemove) {
-            Write-Host "  $($app.Name)" -ForegroundColor Red
-                Write-Log "Aborted: Critical apps marked for removal without -Force." -Level "WARN"
-                return 1
-            }
+        if (-not $Force) {
+            Write-Host "`nTo remove critical apps, use the -Force parameter" -ForegroundColor Yellow
+            Write-Log "Aborted: Critical apps marked for removal without -Force." -Level "WARN"
+            return 1
+        }
+        else {
+            Write-Host "`nProceeding with removal of critical apps because -Force was specified" -ForegroundColor Yellow
         }
     }
+    
     return 0
 }
 function Restore-Apps {
